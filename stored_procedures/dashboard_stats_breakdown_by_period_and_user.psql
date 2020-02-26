@@ -1,0 +1,92 @@
+CREATE OR REPLACE FUNCTION backend.dashboard_stats_breakdown_by_period_and_user(startperiod timestamp with time zone, endperiod timestamp with time zone, user_identity character varying)
+ RETURNS TABLE(sentcount bigint, mobileclickscount bigint, otherclickscount bigint, cost numeric, revenue numeric, profit numeric, roi numeric, cr numeric)
+ LANGUAGE plpgsql
+AS $function$
+
+BEGIN
+	RETURN QUERY
+
+	SELECT coalesce(sent.sentcount, 0) sentcount
+		, coalesce(click.mobileclicks, 0) AS mobileclicks
+		, coalesce(click.otherclicks, 0) AS otherclicks
+		, coalesce(sent.cost, 0.00) AS cost
+		, coalesce(postback.revenue, 0.00) AS revenue
+		, CASE coalesce(postback.revenue, 0)
+			WHEN 0
+				THEN CASE coalesce(sent.cost, 0)
+						WHEN 0
+							THEN 0.00
+						ELSE (sent.cost * - 1)::NUMERIC
+						END
+			ELSE CASE coalesce(sent.cost, 0)
+					WHEN 0
+						THEN postback.revenue
+					ELSE (postback.revenue - sent.cost)::NUMERIC
+					END
+			END AS profit
+		, CASE coalesce(postback.revenue, 0)
+			WHEN 0
+				THEN 0.00
+			ELSE CASE coalesce(sent.cost, 0)
+					WHEN 0
+						THEN 0.00
+					ELSE round((((postback.revenue - sent.cost) / sent.cost)::NUMERIC * 100.00)::NUMERIC, 2)
+					END
+			END AS roi
+		, CASE coalesce(click.mobileclicks, 0)
+			WHEN 0
+				THEN 0.00
+			ELSE CASE coalesce(sent.sentcount, 0)
+					WHEN 0
+						THEN 0.00
+					ELSE round(((click.mobileclicks::NUMERIC / sent.sentcount::NUMERIC)::NUMERIC * 100.00)::NUMERIC, 2)
+					END
+			END AS cr
+	FROM (
+		SELECT count(*) AS sentcount
+			, sum(sent.cost::NUMERIC) AS cost
+		FROM backend.sent
+		WHERE (
+				sent.sent_at BETWEEN startperiod
+					AND endperiod
+				)
+			AND sent.campaign_id IN (
+				SELECT campaign_id
+				FROM backend.campaign
+				WHERE created_by = user_identity
+				)
+		) AS sent
+		, (
+			SELECT count(CASE
+						WHEN click.is_mobile_device = true
+							THEN 1
+						END) AS mobileclicks
+				, count(CASE
+						WHEN click.is_mobile_device = false
+							THEN 1
+						END) AS otherclicks
+			FROM backend.click_stream_event click
+			WHERE (
+					click.clicked_at BETWEEN startperiod
+						AND endperiod
+					)
+				AND click.campaign_id IN (
+					SELECT campaign_id
+					FROM backend.campaign
+					WHERE created_by = user_identity
+					)
+			) AS click
+		, (
+			SELECT sum(postback.payout_amount::NUMERIC) AS revenue
+			FROM backend.postback_event postback
+			WHERE (
+					postback.received_at BETWEEN startperiod
+						AND endperiod
+					)
+				AND postback.campaign_id IN (
+					SELECT campaign_id
+					FROM backend.campaign
+					WHERE created_by = user_identity
+					)
+			) AS postback;
+END;$function$

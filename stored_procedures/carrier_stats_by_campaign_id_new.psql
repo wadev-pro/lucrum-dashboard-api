@@ -1,0 +1,100 @@
+CREATE OR REPLACE FUNCTION backend.carrier_stats_by_campaign_id_new(cid character varying, search character varying, order_by character varying, order_dir character varying, skipcount bigint, takecount bigint)
+ RETURNS TABLE(carrier text, sentcount bigint, mobileclickscount bigint, otherclickscount bigint, cost numeric, revenue numeric, full_count bigint)
+ LANGUAGE plpgsql
+AS $function$
+
+BEGIN
+	RETURN QUERY
+
+	SELECT sent.carrier
+		, coalesce(sent.sentcount, 0) sentcount
+		, coalesce(click.mobileclicks, 0) AS mobileclicks
+		, coalesce(click.otherclicks, 0) AS otherclicks
+		, coalesce(sent.cost, 0.00) AS cost
+		, coalesce(postback.revenue, 0.00) AS revenue
+        , count(*) OVER () AS full_count
+	FROM (
+		SELECT sent.carrier_info_json ->> 'carrier' AS carrier
+			, count(*) AS sentcount
+			, sum(sent.cost::NUMERIC) AS cost
+		FROM backend.sent
+		WHERE sent.campaign_id = cid
+		AND sent.carrier_info_json ->> 'carrier' LIKE '%' || search || '%'
+		GROUP BY 1
+		) AS sent
+	LEFT OUTER JOIN (
+		SELECT sent.carrier_info_json ->> 'carrier' AS carrier
+			, count(CASE
+					WHEN click.is_mobile_device = true
+						THEN 1
+					END) AS mobileclicks
+			, count(CASE
+					WHEN click.is_mobile_device = false
+						THEN 1
+					END) AS otherclicks
+		FROM backend.click_stream_event click
+		INNER JOIN backend.sent sent
+			ON click.campaign_message_id = sent.message_id
+		WHERE click.campaign_id = cid
+		AND sent.carrier_info_json ->> 'carrier' LIKE '%' || search || '%'
+		GROUP BY 1
+		) AS click
+		ON sent.carrier = click.carrier
+	LEFT OUTER JOIN (
+		SELECT sent.carrier_info_json ->> 'carrier' AS carrier
+			, sum(postback.payout_amount::NUMERIC) AS revenue
+		FROM backend.postback_event postback
+		INNER JOIN backend.sent sent
+			ON postback.campaign_message_id = sent.message_id
+		WHERE postback.campaign_id = cid
+		AND sent.carrier_info_json ->> 'carrier' LIKE '%' || search || '%'
+		GROUP BY 1
+		) AS postback
+		ON sent.carrier = postback.carrier
+        ORDER BY CASE
+    			WHEN order_dir = 'asc'
+    				THEN CASE order_by
+    						WHEN 'carrier'
+    							THEN sent.carrier
+    						END
+    			END NULLS FIRST
+    		, CASE
+    			WHEN order_dir = 'desc'
+    				THEN CASE order_by
+    						WHEN 'carrier'
+    							THEN sent.carrier
+    						END
+    			END DESC NULLS LAST
+    		, CASE
+    			WHEN order_dir = 'asc'
+    				THEN CASE order_by
+    						WHEN 'sentcount'
+    							THEN sent.sentcount
+    						WHEN 'mobileclickscount'
+    							THEN click.mobileclicks
+    						WHEN 'otherclickscount'
+    							THEN click.otherclicks
+    						WHEN 'cost'
+    							THEN sent.cost
+    						WHEN 'revenue'
+    							THEN postback.revenue
+    						ELSE click.mobileclicks
+    						END
+    			END NULLS FIRST
+    		, CASE
+    			WHEN order_dir = 'desc'
+    				THEN CASE order_by
+    						WHEN 'sentcount'
+    							THEN sent.sentcount
+    						WHEN 'mobileclickscount'
+    							THEN click.mobileclicks
+    						WHEN 'otherclickscount'
+    							THEN click.otherclicks
+    						WHEN 'cost'
+    							THEN sent.cost
+    						WHEN 'revenue'
+    							THEN postback.revenue
+    						ELSE click.mobileclicks
+    						END
+    			END DESC NULLS LAST limit takecount offset skipcount;
+END;$function$

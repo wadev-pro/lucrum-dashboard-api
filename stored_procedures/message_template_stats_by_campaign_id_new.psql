@@ -1,0 +1,116 @@
+CREATE
+	OR REPLACE FUNCTION backend.message_template_stats_by_campaign_id_new (
+	cid CHARACTER VARYING
+	, search CHARACTER VARYING
+	, order_by CHARACTER VARYING
+	, order_dir CHARACTER VARYING
+	, skipcount BIGINT
+	, takecount BIGINT
+	)
+RETURNS TABLE (
+		templatename TEXT
+		, messagetemplateid CHARACTER VARYING
+		, sentcount BIGINT
+		, mobileclickscount BIGINT
+		, otherclickscount BIGINT
+		, cost NUMERIC
+		, revenue NUMERIC
+		, full_count BIGINT
+		) LANGUAGE plpgsql AS $FUNCTION$
+
+BEGIN
+	RETURN QUERY
+
+	SELECT message_template.name AS templatename
+		, sent.template_id
+		, coalesce(sent.sentcount, 0) sentcount
+		, coalesce(click.mobileclicks, 0) AS mobileclicks
+		, coalesce(click.otherclicks, 0) AS otherclicks
+		, coalesce(sent.cost, 0.00) AS cost
+		, coalesce(postback.revenue, 0.00) AS revenue
+		, count(*) OVER () AS full_count
+	FROM (
+		SELECT sent.template_id AS template_id
+			, count(*) AS sentcount
+			, sum(sent.cost::NUMERIC) AS cost
+		FROM backend.sent
+		WHERE sent.campaign_id = cid
+		GROUP BY 1
+		) AS sent
+	LEFT OUTER JOIN (
+		SELECT sent.template_id AS template_id
+			, count(CASE
+					WHEN click.is_mobile_device = true
+						THEN 1
+					END) AS mobileclicks
+			, count(CASE
+					WHEN click.is_mobile_device = false
+						THEN 1
+					END) AS otherclicks
+		FROM backend.click_stream_event click
+		INNER JOIN backend.sent sent
+			ON click.campaign_message_id = sent.message_id
+		WHERE click.campaign_id = cid
+		GROUP BY 1
+		) AS click
+		ON sent.template_id = click.template_id
+	LEFT OUTER JOIN (
+		SELECT sent.template_id AS template_id
+			, sum(postback.payout_amount::NUMERIC) AS revenue
+		FROM backend.postback_event postback
+		INNER JOIN backend.sent sent
+			ON postback.campaign_message_id = sent.message_id
+		WHERE postback.campaign_id = cid
+		GROUP BY 1
+		) AS postback
+		ON sent.template_id = postback.template_id
+	INNER JOIN backend.message_template AS message_template
+		ON message_template.template_id = sent.template_id
+			AND message_template.name LIKE '%' || search || '%'
+	ORDER BY CASE
+			WHEN order_dir = 'asc'
+				THEN CASE order_by
+						WHEN 'templatename'
+							THEN message_template.name
+						END
+			END NULLS FIRST
+		, CASE
+			WHEN order_dir = 'desc'
+				THEN CASE order_by
+						WHEN 'templatename'
+							THEN message_template.name
+						END
+			END DESC NULLS LAST
+		, CASE
+			WHEN order_dir = 'asc'
+				THEN CASE order_by
+						WHEN 'sentcount'
+							THEN sent.sentcount
+						WHEN 'mobileclickscount'
+							THEN click.mobileclicks
+						WHEN 'otherclickscount'
+							THEN click.otherclicks
+						WHEN 'cost'
+							THEN sent.cost
+						WHEN 'revenue'
+							THEN postback.revenue
+						ELSE click.mobileclicks
+						END
+			END NULLS FIRST
+		, CASE
+			WHEN order_dir = 'desc'
+				THEN CASE order_by
+						WHEN 'sentcount'
+							THEN sent.sentcount
+						WHEN 'mobileclickscount'
+							THEN click.mobileclicks
+						WHEN 'otherclickscount'
+							THEN click.otherclicks
+						WHEN 'cost'
+							THEN sent.cost
+						WHEN 'revenue'
+							THEN postback.revenue
+						ELSE click.mobileclicks
+						END
+			END DESC NULLS LAST limit takecount offset skipcount;
+END;$FUNCTION$

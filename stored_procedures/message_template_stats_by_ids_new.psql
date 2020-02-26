@@ -1,0 +1,52 @@
+CREATE OR REPLACE FUNCTION backend.message_template_stats_by_ids_new(template_ids character varying[], startperiod timestamp with time zone, endperiod timestamp with time zone)
+ RETURNS TABLE(messagetemplateid character varying, sentcount bigint, mobileclickscount bigint, otherclickscount bigint, cost numeric, revenue numeric)
+ LANGUAGE plpgsql
+AS $function$
+
+BEGIN
+	RETURN QUERY
+
+	SELECT sent.template_id
+		, coalesce(sent.sentcount, 0) sentcount
+		, coalesce(click.mobileclicks, 0) AS mobileclicks
+		, coalesce(click.otherclicks, 0) AS otherclicks
+		, coalesce(sent.cost, 0.00) AS cost
+		, coalesce(postback.revenue, 0.00) AS revenue
+	FROM (
+		SELECT sent.template_id AS template_id
+			, count(*) AS sentcount
+			, sum(sent.cost::NUMERIC) AS cost
+		FROM backend.sent
+		WHERE sent.template_id = ANY (template_ids::TEXT [])
+			AND sent.sent_at BETWEEN startperiod
+				AND endperiod
+		GROUP BY 1
+		) AS sent
+	LEFT OUTER JOIN (
+		SELECT sent.template_id AS template_id
+			, count(CASE
+					WHEN click.is_mobile_device = true
+						THEN 1
+					END) AS mobileclicks
+			, count(CASE
+					WHEN click.is_mobile_device = false
+						THEN 1
+					END) AS otherclicks
+		FROM backend.click_stream_event click
+		INNER JOIN backend.sent sent ON click.campaign_message_id = sent.message_id
+		WHERE sent.template_id = ANY (template_ids::TEXT [])
+			AND sent.sent_at BETWEEN startperiod
+				AND endperiod
+		GROUP BY 1
+		) AS click ON sent.template_id = click.template_id
+	LEFT OUTER JOIN (
+		SELECT sent.template_id AS template_id
+			, sum(postback.payout_amount::NUMERIC) AS revenue
+		FROM backend.postback_event postback
+		INNER JOIN backend.sent sent ON postback.campaign_message_id = sent.message_id
+		WHERE sent.template_id = ANY (template_ids::TEXT [])
+			AND sent.sent_at BETWEEN startperiod
+				AND endperiod
+		GROUP BY 1
+		) AS postback ON sent.template_id = postback.template_id;
+END;$function$
